@@ -17,6 +17,9 @@ data.t = (0:height(data)-1)';
 cutoff = datetime(2022,12,1);
 data   = data(data.Date <= cutoff, :);
 
+%% Time index (0,1,2,... in months)
+% data.t = (0:height(data)-1)';
+
 %% Extract variables
 t      = data.t;          % time index (numeric)
 Edata  = data.E_scaled;   % employment (thousands, scaled)
@@ -24,7 +27,6 @@ Wdata  = data.W_real;     % real wages
 Vdata  = data.V;          % value added
 tgrid  = t;               % grid for interpolating V(t) inside ODE
 
-% A0, g unused in pre-AI model but kept in signature if you want later
 A0 = 0;
 g  = 0;
 
@@ -196,12 +198,13 @@ end
 
 %% ======================================================================
 %% ODE SYSTEM
-function Ydot = econ_ode(t, Y, par, tgrid, Vdata)
+function Ydot = econ_ode(t, Y, par, A0, g, tgrid, Vdata)
 
     % States
     E = Y(1);   % employment
     W = Y(2);   % wage
 
+    % Get V(t) by interpolating your discrete Vdata over tgrid
     V = interp1(tgrid, Vdata, t, 'linear', 'extrap');
 
     % Constants
