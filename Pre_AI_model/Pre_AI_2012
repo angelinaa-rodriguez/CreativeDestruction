@@ -1,0 +1,241 @@
+%% fit_preAI_model.m  (PRE-AI VERSION, FIXED)
+
+clear; clc; close all;
+
+%% Load data
+data = readtable('Pre_AI_data.xlsx');
+
+% Make sure Date is datetime
+if ~isdatetime(data.Date)
+    data.Date = datetime(data.Date,'InputFormat','yyyy-MM');
+end
+
+startDate = datetime(2021,7,1);
+data = data(data.Date >= startDate, :);
+data.t = (0:height(data)-1)';
+
+% Example: start the model at 2021-06
+% startDate = datetime(2022,1,1);
+% data = data(~ismember(year(data.Date), [2020 2021]), :);
+% data = data(data.Date >= startDate, :);
+
+% --- If you only want pre-AI period, you can cut here (example up to 2022-12)
+cutoff = datetime(2022,12,1);
+data   = data(data.Date <= cutoff, :);
+
+%% Time index (0,1,2,... in months)
+% data.t = (0:height(data)-1)';
+
+%% Extract variables
+t      = data.t;          % time index (numeric)
+Edata  = data.E_scaled;   % employment (thousands, scaled)
+Wdata  = data.W_real;     % real wages
+Vdata  = data.V;          % value added
+tgrid  = t;               % grid for interpolating V(t) inside ODE
+
+% A0, g unused in pre-AI model but kept in signature if you want later
+A0 = 0;
+g  = 0;
+
+%% Quick plot (E and W only)
+figure;
+plot(data.Date, Edata, 'b-', 'LineWidth', 2); hold on;
+plot(data.Date, Wdata, 'r-', 'LineWidth', 2);
+legend('Employment','Wage','Location','best');
+xlabel('Date'); ylabel('Value');
+title('Employment and Wage over Time (Pre-AI)');
+grid on;
+
+%% Starting guesses
+start_phi   = 0.35;
+start_beta = 0.014;
+start_delta    = 10;
+start_gamma  = 0.01;
+start_rho    = 0.003; 
+    
+par_guess = [start_phi, start_beta, start_delta, start_gamma, start_rho]';
+
+% Lower bounds: all parameters >= 0
+lb = [0; -0.1; 0; 0; 0];
+ub = [2; 0.1; 10; 0.2; 0.2];   % no upper bounds
+
+options = optimoptions('fmincon', ...
+    'Display','iter-detailed', ...
+    'MaxFunctionEvaluations', 20000, ...
+    'MaxIterations', 20000, ...
+    'OptimalityTolerance', 1e-12, ...
+    'StepTolerance', 1e-12);
+
+%% Parameter estimation
+[ParEst, ErrorVal] = fmincon( ...
+    @(p) dist_EW(p, t, Edata, Wdata, Vdata, tgrid, A0, g), ...
+    par_guess, ...
+    [], [], [], [], ...     % A, b, Aeq, beq
+    lb, ub, ...             % lower/upper bounds
+    [], ...                 % no nonlinear constraints
+    options);
+
+disp('Best-fit parameters (fmincon):');
+disp(ParEst)
+disp('Final SSE:');
+disp(ErrorVal);
+
+%% Solve ODE with final parameters on data window
+Y0 = [Edata(1), Wdata(1)];
+[tsol, Ysol] = ode45(@(tt,YY) econ_ode(tt, YY, ParEst, A0, g, tgrid, Vdata), ...
+                     [t(1) t(end)], Y0);
+
+% Interpolate ODE solution at the actual data time points
+E_model = interp1(tsol, Ysol(:,1), t);
+W_model = interp1(tsol, Ysol(:,2), t);
+
+%% Plot fit results
+figure;
+subplot(2,1,1)
+plot(data.Date, Edata,'bo'); hold on;
+plot(data.Date, E_model,'b-','LineWidth',2);
+title('Employment Fit');
+ylabel('Employment (thousands)');
+legend('Data','Model');
+grid on;
+
+subplot(2,1,2)
+plot(data.Date, Wdata,'r+'); hold on;
+plot(data.Date, W_model,'r-','LineWidth',2);
+title('Wage Fit');
+ylabel('Wage ($)');
+xlabel('Date');
+legend('Data','Model');
+grid on;
+
+
+%% RESIDUAL ANALYSIS
+E_resid = Edata - E_model;
+W_resid = Wdata - W_model;
+
+figure;
+subplot(2,1,1);
+plot(data.Date, E_resid, 'bo-', 'LineWidth', 1.2);
+yline(0,'k--');
+xlabel('Date'); ylabel('Residual');
+title('Employment Residuals (Data - Model)');
+grid on;
+
+subplot(2,1,2);
+plot(data.Date, W_resid, 'r+-', 'LineWidth', 1.2);
+yline(0,'k--');
+xlabel('Date'); ylabel('Residual');
+title('Wage Residuals (Data - Model)');
+grid on;
+
+
+%% FORECAST INTO THE FUTURE
+years_forward   = 10;                      % horizon in years
+months_forward  = years_forward * 12;      % horizon in months
+
+t_future   = (t(end) : t(end) + months_forward)';   % extended time index
+Y0_future  = [E_model(end), W_model(end)];          % initial state for forecast
+
+% Full time span for simulation (history + forecast)
+t_full = [t; t_future(2:end)];
+
+[tsol_full, Ysol_full] = ode45( ...
+    @(tt,YY) econ_ode(tt, YY, ParEst, A0, g, tgrid, Vdata), ...
+    t_full, Y0);
+
+% Extract forecast portion
+E_forecast = Ysol_full(length(t)+1:end, 1);
+W_forecast = Ysol_full(length(t)+1:end, 2);
+
+% Time labels for plotting
+future_dates = data.Date(end) + calmonths(1:months_forward);
+all_dates    = [data.Date; future_dates'];
+
+%% Plot Historical + Forecast Employment/Wage
+figure;
+subplot(2,1,1)
+plot(data.Date, Edata,'bo'); hold on;
+plot(data.Date, E_model,'b-','LineWidth',2);
+plot(future_dates, E_forecast,'b--','LineWidth',2);
+title('2012-2019 Employment Fit + 10 Year Forecast');
+ylabel('Employment (thousands)');
+legend('Data','Model Fit','Forecast');
+grid on;
+
+subplot(2,1,2)
+plot(data.Date, Wdata,'r+'); hold on;
+plot(data.Date, W_model,'r-','LineWidth',2);
+plot(future_dates, W_forecast,'r--','LineWidth',2);
+title('2012-2019 Wage Fit + 10 Year Forecast');
+ylabel('Wage ($)');
+xlabel('Date');
+legend('Data','Model Fit','Forecast');
+grid on;
+
+%% SAVE RESULTS FROM PRE-AI MODEL (2021-2022 + 10yr)
+
+results_preAI.dates_hist   = data.Date;      % datetime: 2021–2022
+results_preAI.Edata        = Edata;
+results_preAI.Wdata        = Wdata;
+results_preAI.E_model      = E_model;
+results_preAI.W_model      = W_model;
+results_preAI.future_dates = future_dates';  % datetime: forecast start ~2023
+results_preAI.E_forecast   = E_forecast;
+results_preAI.W_forecast   = W_forecast;
+
+save('preAI_results.mat','results_preAI');
+
+
+%% ======================================================================
+%% DISTANCE FUNCTION  (SSE over E and W)
+function d = dist_EW(par, t, Edata, Wdata, Vdata, tgrid, A0, g)
+
+    Y0 = [Edata(1), Wdata(1)];
+
+    % Solve ODE on the data time grid
+    [~, Ysol] = ode45(@(tt,YY) econ_ode(tt, YY, par, A0, g, tgrid, Vdata), ...
+                      t, Y0);
+
+    Emod = Ysol(:,1);
+    Wmod = Ysol(:,2);
+
+    % Sum of squared errors (both series)
+    d = sum((Emod - Edata).^2 + (Wmod - Wdata).^2);
+end
+
+
+%% ======================================================================
+%% ODE SYSTEM
+function Ydot = econ_ode(t, Y, par, A0, g, tgrid, Vdata)
+
+    % States
+    E = Y(1);   % employment
+    W = Y(2);   % wage
+
+    % If you ever use A(t) later:
+    % A = A0 * exp(g * t);   % currently unused (pre-AI)
+
+    % Get V(t) by interpolating your discrete Vdata over tgrid
+    V = interp1(tgrid, Vdata, t, 'linear', 'extrap');
+
+    % Constants
+    L = 4400;   % labor force (thousands)
+
+    % Parameters
+    phi   = par(1);
+    beta = par(2);
+    delta    = par(3);
+    gamma  = par(4);
+    rho    = par(5);
+
+    % Employment dynamics (your existing form)
+    dE = phi * (L - E) - 0.017 * E + beta * W;
+
+    % Wage dynamics:
+    %   dW = phi * W / (V/E) - gamma * E - rho * W
+    %       = phi * (W * E / V) - gamma * E - rho * W
+    dW = delta * (V/E) - gamma * E - rho * W;
+
+    Ydot = [dE; dW];
+    
+end
