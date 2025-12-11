@@ -27,7 +27,7 @@ pi_val = 0.017;
 
 %% grab the fitted parameters
 % order: start_alpha, start_phi, start_beta, start_k, start_lambda, start_delta, start_gamma, start_rho
-fitted = [10.0000, 0.0624, -0.0174, 0.0006, 0.0006, 6.0083, 0.0015, 0.0000];
+fitted = [10.0000, 0.0668, -0.0215, 1.0000, 1.0000, 4.5142, 0.0000, 0.0000];
 
 % Map to names consistent with econ_ode
 params0.alpha  = fitted(1);
@@ -52,8 +52,8 @@ L = 4400;
 %% set estimation bounds for variables
 
 % alpha, phi, beta, k, lambda, delta, gamma, rho
-est_lb = [  0;   0;   -0.1;   0;    0;   0;    0;    0];
-est_ub = [ 10;   2;    0.1; 0.1;  0.5;  10;  0.2;  0.2];
+est_lb = [  0;   0;   -0.5;   0;    0;   0;    0;    0];
+est_ub = [ 10;   2;    0.1;   1;    5;  50;  0.2;  0.2];
 
 % parameter names in same order
 sampleParams = {'alpha','phi','beta','kappa','lambda','delta','gamma','rho'};
@@ -70,7 +70,7 @@ local_results = struct();
 fnames = fieldnames(params0);
 for k = 1:numel(fnames)
     name = fnames{k};
-    if strcmp(name,'Vdata') || strcmp(name,'pi') || strcmp(name,'E0') || strcmp(name,'W0')
+    if ismember(name, {'Vdata','pi','E0','W0','A0','g'})
         continue;
     end
     baseval = params0.(name);
@@ -88,18 +88,31 @@ for k = 1:numel(fnames)
                                  'elasticity_E',elasticity_E,'elasticity_W',elasticity_W);
 end
 
-% plot local E_final
 names = fieldnames(local_results);
+
+% print results to grab exact values
+fprintf('\nLOCAL RESULTS\n');
+for k = 1:numel(names)
+    nm = names{k};
+    lr = local_results.(nm);
+    fprintf('%s:  dE/dp = %.4f,  dW/dp = %.4f,  elast_E = %.4f,  elast_W = %.4f\n', ...
+        nm, lr.dEdp, lr.dWdp, lr.elasticity_E, lr.elasticity_W);
+end
+
+fprintf('\n');
+
+
+% plot local E_final
 elsE = cellfun(@(n) local_results.(n).elasticity_E, names);
 [elsE_sorted, idxE] = sort(elsE);
 figure; barh(elsE_sorted); set(gca,'YTick',1:numel(names),'YTickLabel',names(idxE));
-xlabel('Elasticity on E(T)'); title('Local elasticities (E final)'); grid on;
+xlabel('Elasticity on E(T)'); title('Local Sensitivity for E(T)'); grid on;
 
 % plot local W_final
 elsW = cellfun(@(n) local_results.(n).elasticity_W, names);
 [elsW_sorted, idxW] = sort(elsW);
 figure; barh(elsW_sorted); set(gca,'YTick',1:numel(names),'YTickLabel',names(idxW));
-xlabel('Elasticity on W(T)'); title('Local elasticities (W final)'); grid on;
+xlabel('Elasticity on W(T)'); title('Local Sensitivity for W(T)'); grid on;
 
 %% global sensitivity -> lhs + PRCC 
 
@@ -197,17 +210,27 @@ for i=1:nparams
     prccW(i) = -Rinv2(i,end) / sqrt(Rinv2(i,i) * Rinv2(end,end));
 end
 
+
+% print results to grab exact values
+fprintf('\nGLOBAL RESULTS\n');
+for i = 1:numel(paramsUsed)
+    fprintf('%s:  PRCC_E = %.4f,  PRCC_W = %.4f\n', ...
+        paramsUsed{i}, prccE(i), prccW(i));
+end
+fprintf('\n');
+
+
 % plot PRCC for E
 [sortedE, idxE] = sort(prccE);
 figure; barh(sortedE);
 set(gca,'YTick',1:sum(varMask),'YTickLabel',paramsUsed(idxE));
-xlabel('PRCC'); title('PRCC for E(T)'); grid on;
+xlabel('PRCC'); title('Global Sensitivity for E(T)'); grid on;
 
 % plot PRCC for W
 [sortedW, idxW] = sort(prccW);
 figure; barh(sortedW);
 set(gca,'YTick',1:sum(varMask),'YTickLabel',paramsUsed(idxW));
-xlabel('PRCC'); title('PRCC for W(T)'); grid on;
+xlabel('PRCC'); title('Global Sensitivity for W(T)'); grid on;
 
 %% results yum
 out.paramSamples = array2table(paramSamples_clean, 'VariableNames', paramsUsed);
@@ -229,25 +252,28 @@ fprintf('successful run yay.');
 function [Efinal, Wfinal] = simulate_model(p, L, T)
     y0 = [p.E0; p.W0];
     opts = odeset('RelTol',1e-6,'AbsTol',1e-8);
-    [tsol, Y] = ode45(@(tt,YY) econ_ode(tt,YY,p,L), [0 T], y0, opts);
+
+    [tsol, Y] = ode45(@(tt,YY) econ_ode(tt,YY,p,p.A0,p.g,p.Vdata,p.pi), ...
+                      [0 T], y0, opts);
+
     Efinal = Y(end,1);
     Wfinal = Y(end,2);
 end
 
 %% copied ode function from main code 
-function Ydot = econ_ode(t, Y, par_struct, L)
-    % Unpack state
-    E = max(Y(1), 1);     % same floor as estimation
+function Ydot = econ_ode(t, Y, par_struct, A0, g, Vdata, pi_val)
+
+    E = max(Y(1), 1); 
     W = Y(2);
 
-    % A(t)
-    A = par_struct.A0 * exp(par_struct.g * t);
+    % innovation curve
+    A = A0 * exp(g*t);
 
-    % pick correct V for this t (use Vdata time series)
-    idx = min(max(floor(t)+1,1), length(par_struct.Vdata));
-    V = par_struct.Vdata(idx);
+    % pick correct V for this t
+    idx = min(max(floor(t)+1,1), length(Vdata));
+    V   = Vdata(idx);
 
-    % Unpack parameters from struct
+    % unpack parameters
     alpha  = par_struct.alpha;
     phi    = par_struct.phi;
     beta   = par_struct.beta;
@@ -256,13 +282,14 @@ function Ydot = econ_ode(t, Y, par_struct, L)
     delta  = par_struct.delta;
     gamma  = par_struct.gamma;
     rho    = par_struct.rho;
-    pi_val_local = par_struct.pi;
 
-    % EMPLOYMENT ODE (note + beta*W)
-    dE = -alpha*(E./A) - pi_val_local*E + phi*(L - E) + beta*W;
+    L = 4400;
 
-    % WAGE ODE (saturating productivity + -delta*(V/E) + gamma*E - rho*W)
-    dW = k .* (A ./ (1 + lambda .* A)) - delta .* (V ./ E) + gamma .* E - rho .* W;
+    % EMPLOYMENT ODE
+    dE = -alpha*(E/A) - pi_val*E + phi*(L - E) + beta*W;
+
+    % WAGE ODE (WITH SATURATION)
+    dW = (k*A)/(1 + lambda*A) + delta*(V/E) - gamma*E - rho*W;
 
     Ydot = [dE; dW];
 end
